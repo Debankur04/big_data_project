@@ -1,0 +1,13 @@
+[project]
+name = "big-data"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.141.1",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.29.0",
+    "scikit-learn>=1.9.0",
+    "streamlit>=1.62.0",
+]

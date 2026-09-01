@@ -1,0 +1,156 @@
+# ============================================================
+# PYTHON
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.pyo
+*.pyd
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.ipynb_checkpoints/
+
+
+# ============================================================
+# VIRTUAL ENVIRONMENTS
+# ============================================================
+
+.venv/
+venv/
+env/
+ENV/
+
+*.env
+
+
+# ============================================================
+# MACHINE LEARNING MODELS
+# ============================================================
+
+# ONNX models
+*.onnx
+
+# Pickled models / objects
+*.pkl
+*.pickle
+
+# Joblib models
+*.joblib
+
+# Saved ML models
+*.model
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.keras
+*.safetensors
+
+# Scikit-learn / TensorFlow / PyTorch model directories
+models/
+model/
+trained_models/
+checkpoints/
+
+
+# ============================================================
+# ML / NLP GENERATED FILES
+# ============================================================
+
+# Vectorizers
+*vectorizer*
+*tfidf*
+
+# Topic modeling artifacts
+*lda*
+*topic_model*
+*topic_router*
+
+# Any generated ML artifacts
+artifacts/
+outputs/
+results/
+
+
+# ============================================================
+# JSON / METADATA
+# ============================================================
+
+# Ignore all JSON files
+*.json
+
+# If you later want a specific JSON tracked,
+# add it back with:
+#
+# !path/to/file.json
+
+
+# ============================================================
+# DATASETS
+# ============================================================
+
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+
+data/
+dataset/
+datasets/
+
+
+# ============================================================
+# LOGS
+# ============================================================
+
+*.log
+logs/
+
+
+# ============================================================
+# STREAMLIT
+# ============================================================
+
+.streamlit/secrets.toml
+
+
+# ============================================================
+# IDE
+# ============================================================
+
+.idea/
+.vscode/
+
+*.iml
+
+
+# ============================================================
+# OS FILES
+# ============================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+
+# ============================================================
+# TEMPORARY FILES
+# ============================================================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+*.zip
+*.tar
+*.gz
