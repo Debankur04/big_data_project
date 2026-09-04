@@ -1,22 +1,96 @@
 import json
+import os
+import tempfile
 from pathlib import Path
-
+from dotenv import load_dotenv
+import boto3
 import joblib
 import numpy as np
 import onnxruntime as ort
 
+load_dotenv()
+
 # ============================================================
-# PATHS
+# S3 CONFIGURATION
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-CLASSIFIER_DIR = BASE_DIR / "classifier"
-TOPIC_DIR = BASE_DIR / "topic_model"
-CLASSIFIER_MODEL_PATH = (CLASSIFIER_DIR / "classifier_model.onnx")
-CLASSIFIER_VECTORIZER_PATH = (CLASSIFIER_DIR / "tfidf_vectorizer.pkl")
-TOPIC_MODEL_PATH = (TOPIC_DIR / "data_modelling_model.onnx")
-TOPIC_VECTORIZER_PATH = (TOPIC_DIR / "tfidf_vectorizer.pkl")
-TOPIC_STATS_PATH = (TOPIC_DIR / "topic_stats.json")
+S3_BUCKET = os.getenv("S3_BUCKET")
+AWS_REGION = os.getenv("AWS_REGION")
+
+S3_KEYS = {
+    "classifier_model": os.getenv("CLASSIFIER_MODEL"),
+    "classifier_vectorizer": os.getenv("CLASSIFIER_VECTORIZER"),
+
+    "topic_model": os.getenv("TOPIC_MODEL"),
+    "topic_vectorizer": os.getenv("TOPIC_VECTORIZER"),
+    "topic_stats": os.getenv("TOPIC_STATS"),
+}
+
+
+# ============================================================
+# LOCAL MODEL CACHE
+# ============================================================
+#
+# Models are downloaded from S3 only once per running container/
+# process and then loaded from the local temporary directory.
+#
+# In ECS, the IAM Task Role provides S3 permissions.
+# Locally, boto3 uses the user's configured AWS credentials.
+# ============================================================
+
+CACHE_DIR = Path(
+    os.environ.get(
+        "MODEL_CACHE_DIR",
+        Path(tempfile.gettempdir()) / "news_truth_models"
+    )
+)
+
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# S3 CLIENT
+# ============================================================
+
+_s3_client = None
+
+
+def _get_s3_client():
+    global _s3_client
+
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            "s3",
+            region_name=AWS_REGION
+        )
+
+    return _s3_client
+
+
+# ============================================================
+# LOCAL PATHS
+# ============================================================
+
+CLASSIFIER_MODEL_PATH = (
+    CACHE_DIR / "classifier_model.onnx"
+)
+
+CLASSIFIER_VECTORIZER_PATH = (
+    CACHE_DIR / "classifier_tfidf_vectorizer.pkl"
+)
+
+TOPIC_MODEL_PATH = (
+    CACHE_DIR / "topic_model.onnx"
+)
+
+TOPIC_VECTORIZER_PATH = (
+    CACHE_DIR / "topic_tfidf_vectorizer.pkl"
+)
+
+TOPIC_STATS_PATH = (
+    CACHE_DIR / "topic_stats.json"
+)
+
 
 # ============================================================
 # MODEL CACHE
@@ -24,9 +98,82 @@ TOPIC_STATS_PATH = (TOPIC_DIR / "topic_stats.json")
 
 _classifier_session = None
 _classifier_vectorizer = None
+
 _topic_session = None
 _topic_vectorizer = None
 _topic_statistics = None
+
+
+# ============================================================
+# S3 DOWNLOAD HELPER
+# ============================================================
+
+def _download_from_s3(s3_key: str, local_path: Path):
+    """
+    Download an artifact from S3 if it does not already
+    exist in the local model cache.
+    """
+
+    if local_path.exists():
+        return
+
+    print(
+        f"Downloading S3 artifact: "
+        f"s3://{S3_BUCKET}/{s3_key}"
+    )
+
+    try:
+        _get_s3_client().download_file(
+            S3_BUCKET,
+            s3_key,
+            str(local_path)
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to download "
+            f"s3://{S3_BUCKET}/{s3_key}: {exc}"
+        ) from exc
+
+
+# ============================================================
+# ENSURE CLASSIFIER ARTIFACTS
+# ============================================================
+
+def _ensure_classifier_artifacts():
+
+    _download_from_s3(
+        S3_KEYS["classifier_model"],
+        CLASSIFIER_MODEL_PATH
+    )
+
+    _download_from_s3(
+        S3_KEYS["classifier_vectorizer"],
+        CLASSIFIER_VECTORIZER_PATH
+    )
+
+
+# ============================================================
+# ENSURE TOPIC ARTIFACTS
+# ============================================================
+
+def _ensure_topic_artifacts():
+
+    _download_from_s3(
+        S3_KEYS["topic_model"],
+        TOPIC_MODEL_PATH
+    )
+
+    _download_from_s3(
+        S3_KEYS["topic_vectorizer"],
+        TOPIC_VECTORIZER_PATH
+    )
+
+    _download_from_s3(
+        S3_KEYS["topic_stats"],
+        TOPIC_STATS_PATH
+    )
+
 
 # ============================================================
 # LOAD CLASSIFIER
@@ -37,77 +184,75 @@ def _load_classifier():
     global _classifier_session
     global _classifier_vectorizer
 
+    _ensure_classifier_artifacts()
+
     # --------------------------------------------------------
     # Load ONNX model
     # --------------------------------------------------------
 
     if _classifier_session is None:
-        if not CLASSIFIER_MODEL_PATH.exists():
-            raise FileNotFoundError(
-                f"Classifier ONNX model not found: "
-                f"{CLASSIFIER_MODEL_PATH}"
-            )
 
-        _classifier_session = ort.InferenceSession(str(CLASSIFIER_MODEL_PATH),providers=["CPUExecutionProvider"])
+        _classifier_session = ort.InferenceSession(
+            str(CLASSIFIER_MODEL_PATH),
+            providers=["CPUExecutionProvider"]
+        )
 
     # --------------------------------------------------------
     # Load TF-IDF vectorizer
     # --------------------------------------------------------
 
     if _classifier_vectorizer is None:
-        if not CLASSIFIER_VECTORIZER_PATH.exists():
-            raise FileNotFoundError(
-                f"Classifier TF-IDF vectorizer not found: "
-                f"{CLASSIFIER_VECTORIZER_PATH}"
-            )
 
-        _classifier_vectorizer = joblib.load(CLASSIFIER_VECTORIZER_PATH)
+        _classifier_vectorizer = joblib.load(
+            CLASSIFIER_VECTORIZER_PATH
+        )
+
 
 # ============================================================
 # LOAD TOPIC MODEL
 # ============================================================
 
 def _load_topic_model():
+
     global _topic_session
     global _topic_vectorizer
     global _topic_statistics
 
+    _ensure_topic_artifacts()
+
     # --------------------------------------------------------
     # Load topic ONNX model
     # --------------------------------------------------------
+
     if _topic_session is None:
-        if not TOPIC_MODEL_PATH.exists():
-            raise FileNotFoundError(
-                f"Topic ONNX model not found: "
-                f"{TOPIC_MODEL_PATH}"
-            )
-        _topic_session = ort.InferenceSession(str(TOPIC_MODEL_PATH),providers=["CPUExecutionProvider"])
+
+        _topic_session = ort.InferenceSession(
+            str(TOPIC_MODEL_PATH),
+            providers=["CPUExecutionProvider"]
+        )
 
     # --------------------------------------------------------
     # Load topic TF-IDF
     # --------------------------------------------------------
 
     if _topic_vectorizer is None:
-        if not TOPIC_VECTORIZER_PATH.exists():
-            raise FileNotFoundError(
-                f"Topic TF-IDF vectorizer not found: "
-                f"{TOPIC_VECTORIZER_PATH}"
-            )
 
-        _topic_vectorizer = joblib.load(TOPIC_VECTORIZER_PATH)
+        _topic_vectorizer = joblib.load(
+            TOPIC_VECTORIZER_PATH
+        )
 
     # --------------------------------------------------------
     # Load topic statistics
     # --------------------------------------------------------
 
     if _topic_statistics is None:
-        if not TOPIC_STATS_PATH.exists():
-            raise FileNotFoundError(
-                f"Topic statistics file not found: "
-                f"{TOPIC_STATS_PATH}"
-            )
 
-        with open(TOPIC_STATS_PATH,"r",encoding="utf-8") as file:
+        with open(
+            TOPIC_STATS_PATH,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             data = json.load(file)
 
         if "root" in data:
@@ -115,6 +260,7 @@ def _load_topic_model():
 
         else:
             _topic_statistics = data
+
 
 # ============================================================
 # LOAD EVERYTHING
@@ -124,6 +270,7 @@ def _load_all():
 
     _load_classifier()
     _load_topic_model()
+
 
 # ============================================================
 # CLASSIFIER
@@ -140,28 +287,33 @@ def _predict_classifier(text):
     tfidf = _classifier_vectorizer.transform([text])
 
     # ONNX expects float32
-    tfidf_dense = (tfidf.toarray().astype(np.float32))
+    tfidf_dense = tfidf.toarray().astype(np.float32)
 
     # ========================================================
     # GET INPUT NAME
     # ========================================================
 
-    input_name = (_classifier_session.get_inputs()[0].name)
+    input_name = _classifier_session.get_inputs()[0].name
 
     # ========================================================
     # GET OUTPUT NAMES
     # ========================================================
 
-    output_names = [output.name
-        for output
-        in _classifier_session.get_outputs()
+    output_names = [
+        output.name
+        for output in _classifier_session.get_outputs()
     ]
 
     # ========================================================
     # RUN ONNX MODEL
     # ========================================================
 
-    outputs = _classifier_session.run(output_names,{input_name: tfidf_dense})
+    outputs = _classifier_session.run(
+        output_names,
+        {
+            input_name: tfidf_dense
+        }
+    )
 
     # ========================================================
     # MAP OUTPUT NAME -> OUTPUT VALUE
@@ -169,8 +321,10 @@ def _predict_classifier(text):
 
     output_map = {
         name: value
-        for name, value
-        in zip(output_names,outputs)
+        for name, value in zip(
+            output_names,
+            outputs
+        )
     }
 
     # ========================================================
@@ -178,24 +332,34 @@ def _predict_classifier(text):
     # ========================================================
 
     if "decision_score" not in output_map:
+
         raise RuntimeError(
             "Classifier ONNX model does not contain "
             "'decision_score' output."
         )
 
-    decision_score = float(np.asarray(output_map["decision_score"]).reshape(-1)[0])
+    decision_score = float(
+        np.asarray(
+            output_map["decision_score"]
+        ).reshape(-1)[0]
+    )
 
     # ========================================================
     # EXTRACT PREDICTION
     # ========================================================
 
     if "prediction" not in output_map:
+
         raise RuntimeError(
             "Classifier ONNX model does not contain "
             "'prediction' output."
         )
 
-    prediction = int(np.asarray(output_map["prediction"]).reshape(-1)[0])
+    prediction = int(
+        np.asarray(
+            output_map["prediction"]
+        ).reshape(-1)[0]
+    )
 
     # ========================================================
     # CONVERT CLASS ID -> LABEL
@@ -207,18 +371,21 @@ def _predict_classifier(text):
     #     1 = Real
 
     if prediction == 0:
+
         label = "fake"
 
     elif prediction == 1:
+
         label = "real"
 
     else:
+
         label = "unknown"
 
     return {
-        "label":label,
-        "class_id":prediction,
-        "decision_score":decision_score
+        "label": label,
+        "class_id": prediction,
+        "decision_score": decision_score
     }
 
 
@@ -230,41 +397,106 @@ def _predict_topic(text):
 
     _load_topic_model()
 
+    # ========================================================
+    # TEXT -> TF-IDF
+    # ========================================================
+
     tfidf = _topic_vectorizer.transform([text])
-    tfidf_dense = (tfidf.toarray().astype(np.float32))
 
-    input_name = (_topic_session.get_inputs()[0].name)
-    output_name = (_topic_session.get_outputs()[0].name)
+    tfidf_dense = tfidf.toarray().astype(np.float32)
 
-    output = _topic_session.run([output_name],{input_name: tfidf_dense})[0]
+    # ========================================================
+    # GET MODEL INPUT / OUTPUT
+    # ========================================================
 
-    topic_distribution = (np.asarray(output[0]).astype(np.float64))
+    input_name = (
+        _topic_session.get_inputs()[0].name
+    )
+
+    output_name = (
+        _topic_session.get_outputs()[0].name
+    )
+
+    # ========================================================
+    # RUN ONNX MODEL
+    # ========================================================
+
+    output = _topic_session.run(
+        [output_name],
+        {
+            input_name: tfidf_dense
+        }
+    )[0]
+
+    topic_distribution = (
+        np.asarray(output[0])
+        .astype(np.float64)
+    )
+
+    # ========================================================
+    # NORMALIZE DISTRIBUTION
+    # ========================================================
 
     total = topic_distribution.sum()
 
     if total <= 0:
+
         raise RuntimeError(
             "Topic model returned an invalid "
             "topic distribution."
         )
 
-    topic_distribution = (topic_distribution / total)
+    topic_distribution = (
+        topic_distribution / total
+    )
 
     # ========================================================
     # DOMINANT TOPIC
     # ========================================================
 
-    dominant_topic = int(np.argmax(topic_distribution))
+    dominant_topic = int(
+        np.argmax(topic_distribution)
+    )
 
-    dominant_probability = float(topic_distribution[dominant_topic])
+    dominant_probability = float(
+        topic_distribution[dominant_topic]
+    )
+
+    # ========================================================
+    # ALL TOPIC PROBABILITIES
+    # ========================================================
 
     topic_probabilities = []
 
-    for topic_id, probability in enumerate(topic_distribution):
+    for topic_id, probability in enumerate(
+        topic_distribution
+    ):
+
+        topic_info_for_distribution = (
+            _topic_statistics.get(
+                str(topic_id),
+                {}
+            )
+        )
+
         topic_probabilities.append({
-            "topic_id":topic_id,
-            "probability":round(float(probability),6),
-            "percentage":round(float(probability) * 100,2)
+
+            "topic_id": topic_id,
+
+            "name": topic_info_for_distribution.get(
+                "name",
+                f"Topic {topic_id}"
+            ),
+
+            "probability": round(
+                float(probability),
+                6
+            ),
+
+            "percentage": round(
+                float(probability) * 100,
+                2
+            )
         })
 
     # ========================================================
@@ -273,7 +505,9 @@ def _predict_topic(text):
 
     topic_key = str(dominant_topic)
 
-    topic_info = (_topic_statistics.get(topic_key))
+    topic_info = _topic_statistics.get(
+        topic_key
+    )
 
     # ========================================================
     # HANDLE MISSING TOPIC
@@ -282,15 +516,26 @@ def _predict_topic(text):
     if topic_info is None:
 
         topic_info = {
-            "topic_id":dominant_topic,
-            "name":f"Topic {dominant_topic}",
-            "top_words":[],
-            "article_count":None,
-            "fake_count":None,
-            "real_count":None,
-            "fake_percentage":None,
-            "real_percentage":None,
-            "reliability":"unknown"
+
+            "topic_id": dominant_topic,
+
+            "name": (
+                f"Topic {dominant_topic}"
+            ),
+
+            "top_words": [],
+
+            "article_count": None,
+
+            "fake_count": None,
+
+            "real_count": None,
+
+            "fake_percentage": None,
+
+            "real_percentage": None,
+
+            "reliability": "unknown"
         }
 
     # ========================================================
@@ -298,21 +543,66 @@ def _predict_topic(text):
     # ========================================================
 
     return {
+
         "dominant_topic": {
-            "topic_id":dominant_topic,
-            "name":topic_info.get("name",f"Topic {dominant_topic}"),
-            "probability":round(dominant_probability,6),
-            "percentage":round(dominant_probability * 100,2),
-            "top_words":topic_info.get("top_words",[])
+
+            "topic_id": dominant_topic,
+
+            "name": topic_info.get(
+                "name",
+                f"Topic {dominant_topic}"
+            ),
+
+            "probability": round(
+                dominant_probability,
+                6
+            ),
+
+            "percentage": round(
+                dominant_probability * 100,
+                2
+            ),
+
+            "top_words": topic_info.get(
+                "top_words",
+                []
+            )
         },
-        "topic_distribution":topic_probabilities,
+
+        "topic_distribution":
+            topic_probabilities,
+
         "historical_statistics": {
-            "article_count":topic_info.get("article_count"),
-            "fake_count":topic_info.get("fake_count"),
-            "real_count":topic_info.get("real_count"),
-            "fake_percentage":topic_info.get("fake_percentage"),
-            "real_percentage":topic_info.get("real_percentage"),
-            "reliability":topic_info.get("reliability")
+
+            "article_count":
+                topic_info.get(
+                    "article_count"
+                ),
+
+            "fake_count":
+                topic_info.get(
+                    "fake_count"
+                ),
+
+            "real_count":
+                topic_info.get(
+                    "real_count"
+                ),
+
+            "fake_percentage":
+                topic_info.get(
+                    "fake_percentage"
+                ),
+
+            "real_percentage":
+                topic_info.get(
+                    "real_percentage"
+                ),
+
+            "reliability":
+                topic_info.get(
+                    "reliability"
+                )
         }
     }
 
@@ -324,26 +614,23 @@ def _predict_topic(text):
 def health():
 
     status = {
-        "status":"ok",
+
+        "status": "ok",
+
         "classifier": {
 
-            "model":
-                False,
+            "model": False,
 
-            "vectorizer":
-                False
+            "vectorizer": False
         },
 
         "topic_model": {
 
-            "model":
-                False,
+            "model": False,
 
-            "vectorizer":
-                False,
+            "vectorizer": False,
 
-            "statistics":
-                False
+            "statistics": False
         }
     }
 
@@ -357,27 +644,17 @@ def health():
 
         _load_classifier()
 
-        status[
-            "classifier"
-        ][
-            "model"
-        ] = True
+        status["classifier"]["model"] = True
 
-        status[
-            "classifier"
-        ][
-            "vectorizer"
-        ] = True
+        status["classifier"]["vectorizer"] = True
 
     except Exception as exc:
 
         errors.append({
 
-            "component":
-                "classifier",
+            "component": "classifier",
 
-            "error":
-                str(exc)
+            "error": str(exc)
         })
 
     # ========================================================
@@ -388,33 +665,19 @@ def health():
 
         _load_topic_model()
 
-        status[
-            "topic_model"
-        ][
-            "model"
-        ] = True
+        status["topic_model"]["model"] = True
 
-        status[
-            "topic_model"
-        ][
-            "vectorizer"
-        ] = True
+        status["topic_model"]["vectorizer"] = True
 
-        status[
-            "topic_model"
-        ][
-            "statistics"
-        ] = True
+        status["topic_model"]["statistics"] = True
 
     except Exception as exc:
 
         errors.append({
 
-            "component":
-                "topic_model",
+            "component": "topic_model",
 
-            "error":
-                str(exc)
+            "error": str(exc)
         })
 
     # ========================================================
@@ -441,14 +704,11 @@ def health():
 # ============================================================
 
 def predict(text):
+
     """
     Main inference function.
 
-    This is the function that app.py should call.
-
-    It does NOT know how the models work internally.
-
-    It simply:
+    It:
 
         1. validates input
         2. runs classifier
@@ -467,10 +727,7 @@ def predict(text):
             "Text cannot be None."
         )
 
-    if not isinstance(
-        text,
-        str
-    ):
+    if not isinstance(text, str):
 
         raise TypeError(
             "Text must be a string."
@@ -488,20 +745,16 @@ def predict(text):
     # RUN CLASSIFIER
     # ========================================================
 
-    classifier_result = (
-        _predict_classifier(
-            text
-        )
+    classifier_result = _predict_classifier(
+        text
     )
 
     # ========================================================
     # RUN TOPIC MODEL
     # ========================================================
 
-    topic_result = (
-        _predict_topic(
-            text
-        )
+    topic_result = _predict_topic(
+        text
     )
 
     # ========================================================
@@ -510,8 +763,7 @@ def predict(text):
 
     response = {
 
-        "success":
-            True,
+        "success": True,
 
         # ----------------------------------------------------
         # Article information
@@ -523,9 +775,7 @@ def predict(text):
                 len(text),
 
             "word_count":
-                len(
-                    text.split()
-                )
+                len(text.split())
         },
 
         # ----------------------------------------------------
@@ -560,7 +810,7 @@ def predict(text):
             ],
 
         # ----------------------------------------------------
-        # All 15 topic probabilities
+        # All topic probabilities
         # ----------------------------------------------------
 
         "topic_distribution":
@@ -569,7 +819,7 @@ def predict(text):
             ],
 
         # ----------------------------------------------------
-        # Historical statistics for dominant topic
+        # Historical statistics
         # ----------------------------------------------------
 
         "historical_topic_statistics":
@@ -586,11 +836,9 @@ def predict(text):
 # ============================================================
 
 def debug_models():
+
     """
     Print the input/output structure of both ONNX models.
-
-    Useful during development to verify that the ONNX files
-    contain the expected inputs and outputs.
     """
 
     _load_all()
@@ -651,3 +899,22 @@ def debug_models():
             f"  Type   : {item.type}"
         )
 
+
+# ============================================================
+# LOCAL TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    print("Checking model loading from S3...")
+
+    health_result = health()
+
+    print(
+        json.dumps(
+            health_result,
+            indent=4
+        )
+    )
+
+    debug_models()
